@@ -15,6 +15,8 @@ const TIMEOUT_MS = 15_000
 const HOUR = 3_600_000
 
 export interface DedicatedTraffic {
+  /** Robot's server number: names are user-set and can repeat. */
+  id: number
   name: string
   /** IPv4 addresses and IPv6 subnets watched. Empty means the server can't be watched. */
   addresses: string[]
@@ -29,6 +31,7 @@ export interface DedicatedTraffic {
 export class RobotError extends Error {}
 
 interface RobotServer {
+  server_number: number
   server_ip: string | null
   server_name: string
   traffic?: string
@@ -65,7 +68,9 @@ export class Robot {
     } catch (e) {
       throw new RobotError(`${path}: ${why(e)}`)
     }
-    // For /traffic, 404 means none of the addresses were found: a wrong list, not "no traffic".
+    // For /server, 404 means the account has no servers. For /traffic it means none of the addresses
+    // were found: a wrong list, not "no traffic".
+    if (res.status === 404 && path === '/server') return [] as T
     if (!res.ok) throw new RobotError(`${path}: HTTP ${res.status}`)
     return res.json() as Promise<T>
   }
@@ -83,11 +88,13 @@ export class Robot {
     const watched = servers.map((s) => {
       const ips = [...new Set([s.server_ip, ...(s.ip ?? [])].filter((x): x is string => !!x))]
       const subnets = (s.subnet ?? []).map(x => x.ip)
-      return { s, ips, subnets }
+      // Robot keys subnet traffic as "ip/mask" (its docs' example); accept the bare ip too.
+      const keys = [...ips.map(ip => [ip]), ...(s.subnet ?? []).map(x => [`${x.ip}/${x.mask}`, x.ip])]
+      return { s, ips, subnets, keys }
     })
     const allIps = watched.flatMap(w => w.ips)
     const allSubnets = watched.flatMap(w => w.subnets)
-    if (!allIps.length && !allSubnets.length) return watched.map(w => ({ name: w.s.server_name, addresses: [], lastHourOutGb: 0, last24hOutGb: 0 }))
+    if (!allIps.length && !allSubnets.length) return watched.map(w => ({ id: w.s.server_number, name: w.s.server_name, addresses: [], lastHourOutGb: 0, last24hOutGb: 0 }))
 
     // The 24 completed hours ending with the last completed one, split at midnight (one request per day).
     const last = new Date(Math.floor(now.getTime() / HOUR) * HOUR - HOUR)
@@ -108,27 +115,35 @@ export class Robot {
 
     const sum = (b: Record<string, { out?: number }> | undefined, pick: (key: string) => boolean = () => true) =>
       Object.entries(b ?? {}).filter(([k]) => pick(k)).reduce((a, [, v]) => a + (v.out ?? 0), 0)
-    const lastHourKey = (k: string) => Number(k.slice(-2)) === last.getUTCHours()
+    // Hour keys: "05", "5", "05:00" or "2026-10-19T05". Anything else is a format change: fail loudly.
+    const hourOf = (k: string) => {
+      const m = /(?:^|T)(\d{1,2})(?::\d{2})?$/.exec(k)
+      if (!m) throw new RobotError(`/traffic: unexpected hour key ${JSON.stringify(k)}`)
+      return Number(m[1])
+    }
+    const lastHourKey = (k: string) => hourOf(k) === last.getUTCHours()
+    const pick = (data: Buckets, keys: string[]) => keys.map(k => data[k]).find(Boolean)
 
-    return watched.map(({ s, ips, subnets }) => {
+    return watched.map(({ s, ips, subnets, keys }) => {
       const addresses = [...ips, ...subnets]
       let last24hOutGb = 0
       let lastHourOutGb = 0
       let todayOutGb = 0
-      for (const addr of addresses) {
+      for (const alts of keys) {
         for (const h of hourly) {
-          last24hOutGb += sum(h.data[addr])
+          const b = pick(h.data, alts)
+          last24hOutGb += sum(b)
           if (h.day === today) {
-            lastHourOutGb += sum(h.data[addr], lastHourKey)
-            todayOutGb += sum(h.data[addr])
+            lastHourOutGb += sum(b, lastHourKey)
+            todayOutGb += sum(b)
           }
         }
       }
       const quota = quotaGb(s.traffic)
-      const t: DedicatedTraffic = { name: s.server_name, addresses, lastHourOutGb, last24hOutGb }
+      const t: DedicatedTraffic = { id: s.server_number, name: s.server_name, addresses, lastHourOutGb, last24hOutGb }
       if (quota !== null) {
         t.quotaGb = quota
-        t.monthOutGb = addresses.reduce((a, addr) => a + sum(daily[addr]), 0) + todayOutGb
+        t.monthOutGb = keys.reduce((a, alts) => a + sum(pick(daily, alts)), 0) + todayOutGb
       }
       return t
     })

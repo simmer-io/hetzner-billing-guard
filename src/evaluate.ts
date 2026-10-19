@@ -2,7 +2,7 @@
 // servers to stop, and the estimated monthly run-rate. No I/O here, so every rule is unit-tested.
 
 import type { Config } from './config.ts'
-import type { Inventory, LocationPrice, Server } from './hcloud.ts'
+import type { Inventory, LocationPrice, Pricing, Server } from './hcloud.ts'
 import type { DedicatedTraffic } from './robot.ts'
 
 export interface State {
@@ -15,9 +15,11 @@ export interface State {
   lastSent: Record<string, string>
   /** When the guard last asked a server to stop, so a server that ignores it gets powered off. */
   shutdownAt: Record<string, string>
+  /** Power-offs sent to a server that still isn't off. */
+  poweroffs: Record<string, number>
 }
 
-export const emptyState = (): State => ({ version: 1, pendingNew: {}, lastSent: {}, shutdownAt: {} })
+export const emptyState = (): State => ({ version: 1, pendingNew: {}, lastSent: {}, shutdownAt: {}, poweroffs: {} })
 
 export interface Alert {
   key: string
@@ -48,6 +50,7 @@ export const POWEROFF_AFTER_MS = 3 * 60_000
 /** New-resource alerts list at most this many resources by name. */
 const LIST_MAX = 10
 const TIB = 1024 ** 4
+const PARTS = ['volumes', 'snapshots', 'primaryIps', 'floatingIps', 'loadBalancers', 'storageBoxes', 'pricing'] as const
 const money = (n: number, currency: string) => `${currency === 'EUR' ? '€' : `${currency} `}${n.toFixed(2)}`
 const tib = (bytes: number) => (bytes / TIB).toFixed(2)
 const price = (s: string | undefined) => (s ? Number(s) : 0)
@@ -59,9 +62,17 @@ function priceAt(prices: LocationPrice[] | undefined, location: string | undefin
   return [...(prices ?? [])].sort((a, b) => price(b.price_monthly.net) - price(a.price_monthly.net))[0]
 }
 
-/** A server's included traffic: from the server, or else from its type's price list. */
+/**
+ * A server's included traffic: from the server, else from its type's price for its location, else the
+ * smallest allowance of any location (so the cap trips early, never late).
+ */
 export function includedTraffic(s: Server): number | undefined {
-  return s.included_traffic || priceAt(s.server_type.prices, s.location.name)?.included_traffic || undefined
+  if (s.included_traffic) return s.included_traffic
+  const prices = s.server_type.prices
+  const exact = prices.find(p => p.location === s.location.name)?.included_traffic
+  if (exact) return exact
+  const all = prices.map(p => p.included_traffic).filter((n): n is number => !!n)
+  return all.length ? Math.min(...all) : undefined
 }
 
 export interface Estimate {
@@ -70,6 +81,8 @@ export interface Estimate {
   items: { label: string, amount: number }[]
   /** Things that exist but have no price in the API: the total is too low by their cost. */
   unpriced: string[]
+  /** Inventory parts that couldn't be read: the total is a lower bound. */
+  missing: string[]
 }
 
 /**
@@ -77,7 +90,7 @@ export interface Estimate {
  * so far. It isn't the month-to-date bill (resources deleted earlier this month are missing), and
  * grandfathered servers are billed below list price, so it errs high for what exists.
  */
-export function estimateMonthly(servers: Server[], inv: Required<Inventory>): Estimate {
+export function estimateMonthly(servers: Server[], inv: Inventory & { pricing: Pricing }): Estimate {
   const p = inv.pricing
   const items: Estimate['items'] = []
   const unpriced: string[] = []
@@ -93,23 +106,24 @@ export function estimateMonthly(servers: Server[], inv: Required<Inventory>): Es
     const over = Math.max(0, (s.outgoing_traffic ?? 0) - (includedTraffic(s) ?? 0))
     if (over > 0) add(`traffic overage ${s.name} (${tib(over)} TiB)`, lp, x => (over / TIB) * price(x.price_per_tb_traffic?.net))
   }
-  for (const v of inv.volumes) items.push({ label: `volume ${v.name} (${v.size} GB)`, amount: v.size * price(p.volume.price_per_gb_month.net) })
-  for (const i of inv.snapshots) items.push({ label: `snapshot ${i.description || i.id} (${(i.image_size ?? 0).toFixed(1)} GB)`, amount: (i.image_size ?? 0) * price(p.image.price_per_gb_month.net) })
-  for (const ip of inv.primaryIps) {
+  for (const v of inv.volumes ?? []) items.push({ label: `volume ${v.name} (${v.size} GB)`, amount: v.size * price(p.volume.price_per_gb_month.net) })
+  for (const i of inv.snapshots ?? []) items.push({ label: `snapshot ${i.description || i.id} (${(i.image_size ?? 0).toFixed(1)} GB)`, amount: (i.image_size ?? 0) * price(p.image.price_per_gb_month.net) })
+  for (const ip of inv.primaryIps ?? []) {
     // IPv6 primary IPs are free.
     if (ip.type === 'ipv6') continue
     add(`primary ${ip.type} ${ip.name}`, priceAt(p.primary_ips.find(x => x.type === ip.type)?.prices, ip.location?.name), x => price(x.price_monthly.net))
   }
-  for (const ip of inv.floatingIps) add(`floating ${ip.type} ${ip.name}`, priceAt(p.floating_ips.find(x => x.type === ip.type)?.prices, ip.home_location.name), x => price(x.price_monthly.net))
-  for (const lb of inv.loadBalancers) {
+  for (const ip of inv.floatingIps ?? []) add(`floating ${ip.type} ${ip.name}`, priceAt(p.floating_ips.find(x => x.type === ip.type)?.prices, ip.home_location.name), x => price(x.price_monthly.net))
+  for (const lb of inv.loadBalancers ?? []) {
     const lp = priceAt(lb.load_balancer_type.prices, lb.location.name)
     add(`load balancer ${lb.name}`, lp, x => price(x.price_monthly.net))
     const over = Math.max(0, (lb.outgoing_traffic ?? 0) - lb.included_traffic)
     if (over > 0) add(`traffic overage ${lb.name} (${tib(over)} TiB)`, lp, x => (over / TIB) * price(x.price_per_tb_traffic?.net))
   }
-  for (const b of inv.storageBoxes) add(`storage box ${b.name} (${b.storage_box_type.name})`, priceAt(b.storage_box_type.prices, b.location.name), x => price(x.price_monthly.net))
+  for (const b of inv.storageBoxes ?? []) add(`storage box ${b.name} (${b.storage_box_type.name})`, priceAt(b.storage_box_type.prices, b.location.name), x => price(x.price_monthly.net))
   items.sort((a, b) => b.amount - a.amount)
-  return { total: items.reduce((a, b) => a + b.amount, 0), currency: p.currency, items, unpriced }
+  const missing = PARTS.filter(k => k !== 'pricing' && inv[k] === undefined)
+  return { total: items.reduce((a, b) => a + b.amount, 0), currency: p.currency, items, unpriced, missing }
 }
 
 type Kind = 'server' | 'volume' | 'snapshot' | 'primary_ip' | 'floating_ip' | 'load_balancer' | 'storage_box'
@@ -130,7 +144,6 @@ function resources(servers: Server[], inv: Inventory): Map<string, string> {
   return m
 }
 
-const PARTS = ['volumes', 'snapshots', 'primaryIps', 'floatingIps', 'loadBalancers', 'storageBoxes', 'pricing'] as const
 /** Every part of the inventory was read (the budget check needs all of it). */
 export function complete(inv: Inventory): inv is Required<Inventory> {
   return PARTS.every(k => inv[k] !== undefined)
@@ -143,12 +156,15 @@ export function evaluate(inputs: Inputs, cfg: Config, prev: State, now: Date) {
   const actions: Action[] = []
   /** Reasons the guard couldn't fully do its job this run: the run is reported as failed. */
   const problems: string[] = []
-  const state: State = { ...prev, pendingNew: { ...prev.pendingNew }, lastSent: { ...prev.lastSent }, shutdownAt: { ...prev.shutdownAt } }
+  const state: State = { ...prev, pendingNew: { ...prev.pendingNew }, lastSent: { ...prev.lastSent }, shutdownAt: { ...prev.shutdownAt }, poweroffs: { ...prev.poweroffs } }
   const dry = cfg.mode === 'dry-run'
 
   // 1. Traffic: warn, then stop the server before it runs into paid overage.
   for (const s of inputs.servers ?? []) {
-    if (isOff(s)) delete state.shutdownAt[s.id]
+    if (isOff(s)) {
+      delete state.shutdownAt[s.id]
+      delete state.poweroffs[s.id]
+    }
     const included = includedTraffic(s)
     if (!included || s.outgoing_traffic == null) {
       problems.push(`no traffic figures for server ${s.name}`)
@@ -167,7 +183,12 @@ export function evaluate(inputs: Inputs, cfg: Config, prev: State, now: Date) {
           what = dry ? `Dry-run: would shut it down (it is ${s.status}).` : 'Shutting it down.'
         } else if (now.getTime() - Date.parse(asked) >= POWEROFF_AFTER_MS) {
           actions.push({ kind: 'poweroff', serverId: s.id, serverName: s.name })
-          what = `It is still ${s.status} after a stop request; powering it off.`
+          const tries = state.poweroffs[s.id] ?? 0
+          what = `It is still ${s.status} after a stop request; powering it off${tries ? ` (attempt ${tries + 1})` : ''}.`
+          if (tries >= 2) {
+            problems.push(`server ${s.name} still ${s.status} after ${tries} power-offs`)
+            alerts.push({ key: `poweroff-stuck:${s.id}`, priority: 'urgent', title: `Hetzner billing guard: ${s.name} won't stop`, message: `${s.name} is still ${s.status} after ${tries} power-offs and keeps sending traffic. Stop or delete it in the console now.`, remindMinutes: 30 })
+          }
         } else {
           what = `Stop requested; it is ${s.status}.`
         }
@@ -178,7 +199,7 @@ export function evaluate(inputs: Inputs, cfg: Config, prev: State, now: Date) {
         title: `Hetzner traffic: ${s.name} over ${kill}%`,
         message: `${s.name} has sent ${usage} of its included traffic this month. ${what} It stays down while over ${kill}%. To bring just this server back, set KILL_OVERRIDES=${s.id}=<higher percent>.`,
         // A real stop is news; in dry-run the same "would stop" is a reminder.
-        force: !dry && actions.some(a => a.serverId === s.id && a.kind === 'shutdown')
+        force: !dry && actions.some(a => a.serverId === s.id && (a.kind === 'shutdown' || !state.poweroffs[s.id]))
       })
     } else if (pct >= cfg.trafficWarnPercent) {
       alerts.push({ key: `traffic-warn:${s.id}`, priority: 'high', title: `Hetzner traffic: ${s.name} at ${pct.toFixed(0)}%`, message: `${s.name} has sent ${usage} of its included traffic. It is shut down at ${kill}%.` })
@@ -196,11 +217,16 @@ export function evaluate(inputs: Inputs, cfg: Config, prev: State, now: Date) {
     const current = resources(inputs.servers, inputs.inventory)
     // A kind that couldn't be read keeps its old keys, so it doesn't look "new" when it comes back.
     const unread = (Object.keys(KIND_OF) as Kind[]).filter(k => k !== 'server' && inputs.inventory![KIND_OF[k] as keyof Inventory] === undefined)
-    const carried = (prev.known ?? []).filter(key => unread.some(k => key.startsWith(`${k}:`)))
+    const isUnread = (key: string) => unread.some(k => key.startsWith(`${k}:`))
+    const carried = (prev.known ?? []).filter(isUnread)
     if (prev.known) {
       const known = new Set(prev.known)
+      // Undelivered alerts stay pending until delivered, even if the resource is gone again: a server
+      // that existed for a while still cost money and still points at a leaked token.
       const pending: Record<string, string> = {}
-      for (const [key, label] of Object.entries(prev.pendingNew)) if (current.has(key)) pending[key] = label
+      for (const [key, label] of Object.entries(prev.pendingNew)) {
+        pending[key] = current.has(key) || isUnread(key) || label.endsWith('(since deleted)') ? label : `${label} (since deleted)`
+      }
       let fresh = 0
       for (const [key, label] of current) {
         if (!known.has(key)) {
@@ -221,16 +247,18 @@ export function evaluate(inputs: Inputs, cfg: Config, prev: State, now: Date) {
         })
       }
       state.pendingNew = pending
-    } else {
+      state.known = [...new Set([...current.keys(), ...carried])].sort()
+    } else if (complete(inputs.inventory)) {
+      // The baseline needs every kind, or the missing ones would all look "new" later.
       alerts.push({ key: 'baseline', priority: 'default', title: 'Hetzner billing guard is watching', message: `First run (${cfg.mode}). Recorded ${current.size} existing Cloud resources; anything new from now on raises an alert.${cfg.healthcheckUrl ? '' : ' No HEALTHCHECK_URL is set, so nothing will tell you if the guard stops running.'}`, force: true })
       state.pendingNew = {}
+      state.known = [...current.keys()].sort()
     }
-    state.known = [...new Set([...current.keys(), ...carried])].sort()
 
     // 3. The estimated monthly run-rate against the budget. Needs the complete inventory.
     const inv = inputs.inventory
-    if (complete(inv)) {
-      const est = estimateMonthly(inputs.servers, inv)
+    if (inv.pricing) {
+      const est = estimateMonthly(inputs.servers, { ...inv, pricing: inv.pricing })
       const fmt = (n: number) => money(n, est.currency)
       if (est.currency !== 'EUR') {
         alerts.push({ key: 'currency', priority: 'default', title: 'Hetzner billing guard: account is not billed in EUR', message: `Prices come back in ${est.currency}; MONTHLY_BUDGET_EUR is compared in ${est.currency}.` })
@@ -238,9 +266,11 @@ export function evaluate(inputs: Inputs, cfg: Config, prev: State, now: Date) {
       if (est.unpriced.length) {
         alerts.push({ key: 'unpriced', priority: 'high', title: 'Hetzner billing guard: some resources have no price', message: `The estimate leaves these out, so the real bill is higher: ${est.unpriced.slice(0, LIST_MAX).join('; ')}.` })
       }
+      // With parts missing the total is a lower bound, so going over budget is still certain.
       if (est.total > cfg.monthlyBudget!) {
         const top = est.items.slice(0, 5).map(i => `${i.label}: ${fmt(i.amount)}`).join('; ')
-        alerts.push({ key: 'budget', priority: 'urgent', title: `Hetzner: estimated ${fmt(est.total)}/mo, over budget`, message: `Estimated monthly run-rate ${fmt(est.total)} (list prices, excl. VAT) is over MONTHLY_BUDGET_EUR ${fmt(cfg.monthlyBudget!)}. Biggest items: ${top}. The guard doesn't delete anything; check the console.` })
+        const atLeast = est.missing.length ? 'at least ' : ''
+        alerts.push({ key: 'budget', priority: 'urgent', title: `Hetzner: estimated ${atLeast}${fmt(est.total)}/mo, over budget`, message: `Estimated monthly run-rate ${atLeast}${fmt(est.total)} (list prices, excl. VAT) is over MONTHLY_BUDGET_EUR ${fmt(cfg.monthlyBudget!)}.${est.missing.length ? ` Not counted (couldn't be read): ${est.missing.join(', ')}.` : ''} Biggest items: ${top}. The guard doesn't delete anything; check the console.` })
       }
     }
   }
@@ -248,20 +278,20 @@ export function evaluate(inputs: Inputs, cfg: Config, prev: State, now: Date) {
   // 4. Dedicated servers: alerts only.
   for (const d of inputs.dedicated ?? []) {
     if (!d.addresses.length) {
-      alerts.push({ key: `robot-unwatched:${d.name}`, priority: 'high', title: `Hetzner billing guard: ${d.name} has no addresses`, message: `Robot lists no IP or subnet for ${d.name}, so its traffic isn't watched.` })
+      alerts.push({ key: `robot-unwatched:${d.id}`, priority: 'high', title: `Hetzner billing guard: ${d.name} has no addresses`, message: `Robot lists no IP or subnet for ${d.name}, so its traffic isn't watched.` })
       continue
     }
     if (d.lastHourOutGb > cfg.robotHourlyOutGb) {
-      alerts.push({ key: `robot-hour:${d.name}`, priority: 'high', title: `Hetzner traffic: ${d.name} ${d.lastHourOutGb.toFixed(0)} GB in an hour`, message: `${d.name} sent ${d.lastHourOutGb.toFixed(1)} GB in the last completed hour (limit ${cfg.robotHourlyOutGb} GB). Look for hotlinking or a crawler.` })
+      alerts.push({ key: `robot-hour:${d.id}`, priority: 'high', title: `Hetzner traffic: ${d.name} ${d.lastHourOutGb.toFixed(0)} GB in an hour`, message: `${d.name} sent ${d.lastHourOutGb.toFixed(1)} GB in the last completed hour (limit ${cfg.robotHourlyOutGb} GB). Look for hotlinking or a crawler.` })
     }
     if (d.last24hOutGb > cfg.robotDailyOutGb) {
-      alerts.push({ key: `robot-day:${d.name}`, priority: 'high', title: `Hetzner traffic: ${d.name} ${d.last24hOutGb.toFixed(0)} GB in 24h`, message: `${d.name} has sent ${d.last24hOutGb.toFixed(1)} GB in the last 24 completed hours (limit ${cfg.robotDailyOutGb} GB).` })
+      alerts.push({ key: `robot-day:${d.id}`, priority: 'high', title: `Hetzner traffic: ${d.name} ${d.last24hOutGb.toFixed(0)} GB in 24h`, message: `${d.name} has sent ${d.last24hOutGb.toFixed(1)} GB in the last 24 completed hours (limit ${cfg.robotDailyOutGb} GB).` })
     }
     if (d.quotaGb !== undefined && d.monthOutGb !== undefined) {
       const pct = (d.monthOutGb / d.quotaGb) * 100
       if (pct >= cfg.trafficWarnPercent) {
         const over = pct >= cfg.trafficKillPercent
-        alerts.push({ key: `robot-quota:${d.name}`, priority: over ? 'urgent' : 'high', title: `Hetzner traffic: ${d.name} at ${pct.toFixed(0)}% of its quota`, message: `${d.name} has sent ${d.monthOutGb.toFixed(0)} of its ${d.quotaGb.toFixed(0)} GB monthly quota; beyond it Hetzner bills per TB. The guard doesn't stop dedicated servers${over ? ': act now in Robot' : ''}.` })
+        alerts.push({ key: `robot-quota:${d.id}`, priority: over ? 'urgent' : 'high', title: `Hetzner traffic: ${d.name} at ${pct.toFixed(0)}% of its quota`, message: `${d.name} has sent ${d.monthOutGb.toFixed(0)} of its ${d.quotaGb.toFixed(0)} GB monthly quota; beyond it Hetzner bills per TB. The guard doesn't stop dedicated servers${over ? ': act now in Robot' : ''}.` })
       }
     }
   }
@@ -269,7 +299,7 @@ export function evaluate(inputs: Inputs, cfg: Config, prev: State, now: Date) {
   return { alerts, actions, state, problems }
 }
 
-/** At most this many alerts per run; the rest are summarized in one more. */
+/** About this many alerts per run (forced ones always go); the rest are summarized in one more. */
 export const MAX_SENDS = 8
 
 /**
@@ -288,9 +318,14 @@ export function due(alerts: Alert[], state: State, now: Date, remindHours: numbe
   // Most urgent first; anything past the cap is folded into one summary (and stays due next run).
   const rank = { urgent: 0, high: 1, default: 2 }
   send.sort((a, b) => rank[a.priority] - rank[b.priority])
-  if (send.length > MAX_SENDS) {
-    const rest = send.slice(MAX_SENDS - 1)
-    send = [...send.slice(0, MAX_SENDS - 1), { key: 'more', priority: rest[0]!.priority, title: `Hetzner billing guard: ${rest.length} more alerts`, message: rest.map(a => a.title).join('; '), force: true }]
+  // Forced alerts are one-off events, so they're never folded away.
+  const forced = send.filter(a => a.force)
+  const other = send.filter(a => !a.force)
+  const room = Math.max(0, MAX_SENDS - 1 - forced.length)
+  if (forced.length + other.length > MAX_SENDS) {
+    const rest = other.slice(room)
+    send = [...forced, ...other.slice(0, room), { key: 'more', priority: rest[0]!.priority, title: `Hetzner billing guard: ${rest.length} more alerts`, message: rest.map(a => a.title).join('; '), force: true }]
+    send.sort((a, b) => rank[a.priority] - rank[b.priority])
   }
   for (const a of send) if (a.key !== 'more') lastSent[a.key] = now.toISOString()
   return { send, lastSent }

@@ -18,7 +18,7 @@ describe('state file', () => {
     assert.deepEqual((await loadState(path, now)).state.known, ['server:1'])
   })
 
-  for (const [name, content] of [['empty', ''], ['truncated', '{"version":1,"kno'], ['from another version', '{"version":2}']]) {
+  for (const [name, content] of [['empty', ''], ['truncated', '{"version":1,"kno'], ['from another version', '{"version":2}'], ['null-field', '{"version":1,"pendingNew":null}'], ['wrong-type', '{"version":1,"known":"server:1"}'], ['non-object', '[1]']]) {
     it(`moves a ${name} state file aside and starts over instead of crashing`, async () => {
       const dir = await mkdtemp(join(tmpdir(), 'guard-'))
       const path = join(dir, 'state.json')

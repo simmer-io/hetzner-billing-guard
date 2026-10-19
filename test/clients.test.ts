@@ -73,7 +73,7 @@ describe('Hcloud', () => {
 })
 
 describe('Robot', () => {
-  const bigbox = { server: { server_ip: '192.0.2.1', server_name: 'bigbox', traffic: 'unlimited', ip: ['192.0.2.1', '192.0.2.9'], subnet: [{ ip: '2001:db8::', mask: '64' }] } }
+  const bigbox = { server: { server_number: 7, server_ip: '192.0.2.1', server_name: 'bigbox', traffic: 'unlimited', ip: ['192.0.2.1', '192.0.2.9'], subnet: [{ ip: '2001:db8::', mask: '64' }] } }
   const forms = (calls: Call[]) => calls.filter(c => c.url.pathname === '/traffic').map(c => new URLSearchParams(String(c.init.body)))
 
   it('queries the 24 completed hours across midnight, for every IP and subnet, and sums them', async () => {
@@ -81,10 +81,10 @@ describe('Robot', () => {
       if (url.pathname === '/server') return [bigbox]
       const f = new URLSearchParams(String(init.body))
       if (f.get('from')!.startsWith('2026-10-18')) return { traffic: { data: { '192.0.2.1': { 23: { out: 5 } } } } }
-      return { traffic: { data: { '192.0.2.1': { '00': { out: 10 }, '04': { out: 30.5 } }, '2001:db8::': { '04': { out: 1 } } } } }
+      return { traffic: { data: { '192.0.2.1': { '00': { out: 10 }, '04': { out: 30.5 } }, '2001:db8::/64': { '04': { out: 1 } } } } }
     })
     const t = await new Robot('u', 'p').traffic(new Date('2026-10-19T05:30:00Z'))
-    assert.deepEqual(t, [{ name: 'bigbox', addresses: ['192.0.2.1', '192.0.2.9', '2001:db8::'], lastHourOutGb: 31.5, last24hOutGb: 46.5 }])
+    assert.deepEqual(t, [{ id: 7, name: 'bigbox', addresses: ['192.0.2.1', '192.0.2.9', '2001:db8::'], lastHourOutGb: 31.5, last24hOutGb: 46.5 }])
     const [y, d] = forms(calls)
     assert.deepEqual([y!.get('from'), y!.get('to'), d!.get('from'), d!.get('to')], ['2026-10-18T05', '2026-10-18T23', '2026-10-19T00', '2026-10-19T04'])
     assert.deepEqual(d!.getAll('ip[]'), ['192.0.2.1', '192.0.2.9'])
@@ -118,8 +118,25 @@ describe('Robot', () => {
   })
 
   it('reports a server with no addresses instead of dropping it', async () => {
-    fakeFetch(() => [{ server: { server_ip: null, server_name: 'v6only', ip: [], subnet: [] } }])
-    assert.deepEqual(await new Robot('u', 'p').traffic(new Date()), [{ name: 'v6only', addresses: [], lastHourOutGb: 0, last24hOutGb: 0 }])
+    fakeFetch(() => [{ server: { server_number: 3, server_ip: null, server_name: 'v6only', ip: [], subnet: [] } }])
+    assert.deepEqual(await new Robot('u', 'p').traffic(new Date()), [{ id: 3, name: 'v6only', addresses: [], lastHourOutGb: 0, last24hOutGb: 0 }])
+  })
+
+  it('counts an IPv6-only server\'s subnet traffic (keyed "ip/mask")', async () => {
+    const v6 = { server: { server_number: 4, server_ip: null, server_name: 'v6', ip: [], subnet: [{ ip: '2001:db8::', mask: '64' }] } }
+    fakeFetch(url => url.pathname === '/server' ? [v6] : { traffic: { data: { '2001:db8::/64': { '04': { out: 24 } } } } })
+    const [t] = await new Robot('u', 'p').traffic(new Date('2026-10-19T05:30:00Z'))
+    assert.equal(t!.lastHourOutGb, 24)
+  })
+
+  it('treats an account with no servers (404 on /server) as nothing to watch', async () => {
+    fakeFetch(() => new Response('', { status: 404 }))
+    assert.deepEqual(await new Robot('u', 'p').traffic(new Date()), [])
+  })
+
+  it('fails loudly on an unexpected hour-key format instead of miscounting', async () => {
+    fakeFetch(url => url.pathname === '/server' ? [bigbox] : { traffic: { data: { '192.0.2.1': { 'hour five': { out: 1 } } } } })
+    await assert.rejects(new Robot('u', 'p').traffic(new Date('2026-10-19T05:30:00Z')), /unexpected hour key/)
   })
 
   it('parses traffic quotas', () => {

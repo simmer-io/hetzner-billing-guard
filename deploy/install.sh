@@ -20,8 +20,16 @@ rm -rf /opt/billing-guard.new
 install -d -m 755 /opt/billing-guard.new/src
 install -m 644 src/*.ts /opt/billing-guard.new/src/
 install -m 644 package.json /opt/billing-guard.new/
-rm -rf /opt/billing-guard
-mv /opt/billing-guard.new /opt/billing-guard
+# Swap with the old tree moved aside first, so there's never a moment with no code (and a failed
+# swap puts the old code back).
+rm -rf /opt/billing-guard.old
+if [ -e /opt/billing-guard ]; then mv /opt/billing-guard /opt/billing-guard.old; fi
+if ! mv /opt/billing-guard.new /opt/billing-guard; then
+  [ -e /opt/billing-guard.old ] && mv /opt/billing-guard.old /opt/billing-guard
+  echo "install: could not install the new code; kept the old" >&2
+  exit 1
+fi
+rm -rf /opt/billing-guard.old
 
 install -d -m 700 -o root -g root /etc/billing-guard
 if [ -e /etc/billing-guard/env ]; then

@@ -5,7 +5,7 @@
 // exits 1 and pings the healthcheck's /fail, so a guard that's quietly not watching is never "green".
 
 import { ConfigError, healthcheckUrlOf, loadConfig, type Config } from './config.ts'
-import { complete, due, estimateMonthly, evaluate, includedTraffic, type Alert, type Inputs } from './evaluate.ts'
+import { due, estimateMonthly, evaluate, includedTraffic, type Alert, type Inputs } from './evaluate.ts'
 import { Hcloud } from './hcloud.ts'
 import { ping, sendNtfy } from './notify.ts'
 import { Robot } from './robot.ts'
@@ -101,13 +101,20 @@ async function run(cfg: Config): Promise<string[]> {
       console.log(`${a.kind}: ${a.serverName} (${a.serverId})`)
       // The next escalation (or a repeated power-off) waits POWEROFF_AFTER_MS from now.
       state.shutdownAt[a.serverId] = now.toISOString()
+      if (a.kind === 'poweroff') state.poweroffs[a.serverId] = (state.poweroffs[a.serverId] ?? 0) + 1
     } catch (e) {
       problems.push((e as Error).message)
       extra.push({ key: `action-failed:${a.serverId}`, priority: 'urgent', title: `Hetzner billing guard: could not stop ${a.serverName}`, message: `${a.kind} of ${a.serverName} failed: ${(e as Error).message}. Stop it in the console now.`, remindMinutes: 30 })
     }
   }
   // Save what was done before notifying, so a hung notification can't make the next run repeat it.
-  await saveState(cfg.stateFile, state)
+  // A failed save must not stop the alerts.
+  try {
+    await saveState(cfg.stateFile, state)
+  } catch (e) {
+    problems.push(`could not save state: ${(e as Error).message}`)
+    extra.push({ key: 'error:state', priority: 'urgent', title: 'Hetzner billing guard: cannot save its state', message: `Saving ${cfg.stateFile} failed: ${(e as Error).message}. Alerts repeat and power-off escalation can't progress until this is fixed.`, remindMinutes: 60 })
+  }
 
   const { send, lastSent } = due([...alerts, ...extra], state, now, cfg.remindHours)
   state.lastSent = lastSent
@@ -125,7 +132,11 @@ async function run(cfg: Config): Promise<string[]> {
       else delete state.lastSent[a.key]
     }
   }
-  await saveState(cfg.stateFile, state)
+  try {
+    await saveState(cfg.stateFile, state)
+  } catch (e) {
+    problems.push(`could not save state: ${(e as Error).message}`)
+  }
 
   // The journal gets a short report every run.
   for (const s of inputs.servers ?? []) {
@@ -133,9 +144,9 @@ async function run(cfg: Config): Promise<string[]> {
     const pct = included ? ((s.outgoing_traffic ?? 0) / included) * 100 : 0
     console.log(`server ${s.name}: ${s.status}, traffic ${pct.toFixed(2)}% of included`)
   }
-  if (inputs.servers && inputs.inventory && complete(inputs.inventory)) {
-    const est = estimateMonthly(inputs.servers, inputs.inventory)
-    console.log(`estimated monthly run-rate: ${est.total.toFixed(2)} ${est.currency} (budget ${cfg.monthlyBudget})`)
+  if (inputs.servers && inputs.inventory?.pricing) {
+    const est = estimateMonthly(inputs.servers, { ...inputs.inventory, pricing: inputs.inventory.pricing })
+    console.log(`estimated monthly run-rate: ${est.missing.length ? 'at least ' : ''}${est.total.toFixed(2)} ${est.currency} (budget ${cfg.monthlyBudget})`)
   }
   for (const d of inputs.dedicated ?? []) console.log(`dedicated ${d.name}: ${d.lastHourOutGb.toFixed(1)} GB out last hour, ${d.last24hOutGb.toFixed(1)} GB in 24h${d.quotaGb ? `, ${d.monthOutGb!.toFixed(0)} of ${d.quotaGb} GB this month` : ''}`)
   console.log(`${cfg.mode}: ${alerts.length + extra.length} alert(s) active, ${delivered} of ${send.length} sent, ${actions.length} action(s)`)

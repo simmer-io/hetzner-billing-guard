@@ -16,18 +16,30 @@ export async function loadState(path: string, now: Date): Promise<Loaded> {
     raw = await readFile(path, 'utf8')
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { state: emptyState() }
-    throw e
+    // A state that can't be read must never stop the guard (the kill switch runs after this).
+    return { state: emptyState(), reset: `state file could not be read (${(e as NodeJS.ErrnoException).code ?? (e as Error).message})` }
   }
   try {
-    const s = JSON.parse(raw) as State
-    if (s?.version !== 1) throw new Error(`unknown version ${String(s?.version)}`)
-    return { state: { ...emptyState(), ...s } }
+    return { state: check(JSON.parse(raw)) }
   } catch (e) {
-    // A broken state must never stop the guard: keep the file for inspection and start over.
+    // Keep a broken file for inspection and start over.
     const aside = `${path}.broken-${now.toISOString().replace(/[:.]/g, '-')}`
-    await rename(path, aside)
-    return { state: emptyState(), reset: `state file was unreadable (${(e as Error).message}); moved to ${aside}` }
+    const moved = await rename(path, aside).then(() => true, () => false)
+    return { state: emptyState(), reset: `state file was unreadable (${(e as Error).message})${moved ? `; moved to ${aside}` : ''}` }
   }
+}
+
+const isMap = (v: unknown) => typeof v === 'object' && v !== null && !Array.isArray(v)
+
+/** The parsed file, with every field of the right shape, or an error (which resets the state). */
+function check(raw: unknown): State {
+  const s = { ...emptyState(), ...(isMap(raw) ? raw as object : {}) } as State
+  if (!isMap(raw) || s.version !== 1) throw new Error(`unknown version ${String((raw as State | null)?.version)}`)
+  if (s.known !== undefined && !(Array.isArray(s.known) && s.known.every(k => typeof k === 'string'))) throw new Error('"known" is not a list of strings')
+  for (const k of ['pendingNew', 'lastSent', 'shutdownAt', 'poweroffs'] as const) {
+    if (!isMap(s[k])) throw new Error(`"${k}" is not an object`)
+  }
+  return s
 }
 
 export async function saveState(path: string, state: State) {

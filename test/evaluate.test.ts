@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
-import { due, emptyState, estimateMonthly, evaluate, MAX_SENDS, POWEROFF_AFTER_MS, type Alert, type State } from '../src/evaluate.ts'
+import { due, emptyState, estimateMonthly, evaluate, includedTraffic, MAX_SENDS, POWEROFF_AFTER_MS, type Alert, type State } from '../src/evaluate.ts'
 import type { Inventory, Server } from '../src/hcloud.ts'
 import { cfg, inventory, server, TIB } from './fixtures.ts'
 
@@ -65,6 +65,29 @@ describe('traffic', () => {
   it('falls back to the type price list when the server has no included-traffic figure', () => {
     const r = run([server({ included_traffic: null, outgoing_traffic: 19 * TIB })])
     assert.deepEqual(r.actions.map(a => a.kind), ['shutdown'])
+  })
+
+  it('with no price for its own location, uses the smallest allowance, so the cap trips early', () => {
+    const money = { net: '1', gross: '1' }
+    const s = server({ included_traffic: null, location: { name: 'hil' }, outgoing_traffic: TIB, server_type: { name: 'x', prices: [{ location: 'fsn1', price_monthly: money, included_traffic: 20 * TIB }, { location: 'ash', price_monthly: money, included_traffic: TIB }] } })
+    assert.equal(includedTraffic(s), TIB)
+    assert.deepEqual(run([s]).actions.map(a => a.kind), ['shutdown'])
+  })
+
+  it('raises the alert on the first power-off, and an urgent "won\'t stop" after repeated ones', () => {
+    const s = server({ outgoing_traffic: 19 * TIB })
+    const first = run([s], watched({ shutdownAt: { 1: ago(POWEROFF_AFTER_MS) } }))
+    assert.equal(first.alerts[0]!.force, true)
+    const stuck = run([s], watched({ shutdownAt: { 1: ago(POWEROFF_AFTER_MS) }, poweroffs: { 1: 2 } }))
+    assert.equal(stuck.alerts.find(x => x.key === 'traffic-kill:1')!.force, false)
+    const a = stuck.alerts.find(x => x.key === 'poweroff-stuck:1')!
+    assert.equal(a.priority, 'urgent')
+    assert.equal(a.remindMinutes, 30)
+    assert.equal(stuck.problems.length, 1)
+  })
+
+  it('forgets power-off attempts once the server is off', () => {
+    assert.deepEqual(run([server({ status: 'off' })], watched({ poweroffs: { 1: 3 } })).state.poweroffs, {})
   })
 
   it('fails loudly when no traffic figures exist at all, instead of silently uncapping', () => {
@@ -141,6 +164,27 @@ describe('new resources', () => {
     assert.deepEqual(keys(run([server()], blind.state, cfg(), inventory({ volumes: [vol] })).alerts), [])
   })
 
+  it('keeps an undelivered alert for a resource deleted in the meantime', () => {
+    const first = run([server(), miner])
+    const second = run([server()], first.state)
+    assert.match(second.alerts.find(x => x.key === 'new-resources')!.message, /miner .*\(since deleted\)/)
+  })
+
+  it('keeps an undelivered alert when its kind could not be read this run', () => {
+    const vol = { id: 7, name: 'v', size: 10, location: { name: 'fsn1' } }
+    const first = run([server()], watched(), cfg(), inventory({ volumes: [vol] }))
+    const blind = run([server()], first.state, cfg(), inventory({ volumes: undefined }))
+    assert.deepEqual(Object.keys(blind.state.pendingNew), ['volume:7'])
+    assert.match(blind.alerts.find(x => x.key === 'new-resources')!.message, /volume v/)
+    assert.doesNotMatch(blind.alerts.find(x => x.key === 'new-resources')!.message, /since deleted/)
+  })
+
+  it('waits for a complete inventory before recording the baseline', () => {
+    const r = run([server()], emptyState(), cfg(), inventory({ volumes: undefined }))
+    assert.equal(r.state.known, undefined)
+    assert.ok(!keys(r.alerts).includes('baseline'))
+  })
+
   it('keeps the old baseline when the server list could not be read', () => {
     const r = evaluate({ inventory: inventory() }, cfg(), watched(), now)
     assert.deepEqual(r.state.known, ['server:1'])
@@ -174,8 +218,11 @@ describe('budget', () => {
     assert.match(r.alerts[0]!.message, /server app \(cpx21\): €10\.99/)
   })
 
-  it('skips the budget check when part of the inventory is missing', () => {
-    assert.deepEqual(keys(run([server()], watched(), cfg({ monthlyBudget: 5 }), inventory({ storageBoxes: undefined })).alerts), [])
+  it('with part of the inventory missing, still alerts on a known overrun as "at least"', () => {
+    const r = run([server()], watched(), cfg({ monthlyBudget: 5 }), inventory({ storageBoxes: undefined }))
+    const a = r.alerts.find(x => x.key === 'budget')!
+    assert.match(a.title, /at least €10\.99/)
+    assert.match(a.message, /Not counted .*storageBoxes/)
   })
 
   it('notes a non-EUR account', () => {
@@ -186,22 +233,22 @@ describe('budget', () => {
 })
 
 describe('dedicated servers', () => {
-  const d = { name: 'bigbox', addresses: ['192.0.2.1'], lastHourOutGb: 0, last24hOutGb: 0 }
+  const d = { id: 7, name: 'bigbox', addresses: ['192.0.2.1'], lastHourOutGb: 0, last24hOutGb: 0 }
 
   it('alerts on a busy hour or a busy day, and never acts', () => {
     const r = evaluate({ dedicated: [{ ...d, last24hOutGb: 2500, lastHourOutGb: 300 }] }, cfg(), watched(), now)
-    assert.deepEqual(keys(r.alerts), ['robot-hour:bigbox', 'robot-day:bigbox'])
+    assert.deepEqual(keys(r.alerts), ['robot-hour:7', 'robot-day:7'])
     assert.deepEqual(r.actions, [])
   })
 
   it('alerts on a metered server nearing its quota', () => {
     const r = evaluate({ dedicated: [{ ...d, quotaGb: 20_000, monthOutGb: 19_000 }] }, cfg(), watched(), now)
-    assert.deepEqual(keys(r.alerts), ['robot-quota:bigbox'])
+    assert.deepEqual(keys(r.alerts), ['robot-quota:7'])
     assert.equal(r.alerts[0]!.priority, 'urgent')
   })
 
   it('alerts when a server has no address to watch', () => {
-    assert.deepEqual(keys(evaluate({ dedicated: [{ ...d, addresses: [] }] }, cfg(), watched(), now).alerts), ['robot-unwatched:bigbox'])
+    assert.deepEqual(keys(evaluate({ dedicated: [{ ...d, addresses: [] }] }, cfg(), watched(), now).alerts), ['robot-unwatched:7'])
   })
 })
 
@@ -226,6 +273,13 @@ describe('due', () => {
     const r = due([{ ...a, force: true }], { ...emptyState(), lastSent: { k: now.toISOString(), old: now.toISOString() } }, now, 6)
     assert.equal(r.send.length, 1)
     assert.deepEqual(Object.keys(r.lastSent), ['k'])
+  })
+
+  it('never folds forced (one-off) alerts into the summary', () => {
+    const many: Alert[] = Array.from({ length: 20 }, (_, i) => ({ key: `k${i}`, priority: 'high', title: `t${i}`, message: 'm' }))
+    const r = due([...many, { key: 'baseline', priority: 'default', title: 'b', message: 'm', force: true }], emptyState(), now, 6)
+    assert.ok(r.send.some(a => a.key === 'baseline'))
+    assert.equal(r.send.length, MAX_SENDS)
   })
 
   it('caps sends per run, most urgent first, and leaves the overflow due next run', () => {

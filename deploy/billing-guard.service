@@ -1,0 +1,28 @@
+[Unit]
+Description=Hetzner billing guard (one run)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Settings and tokens: root-owned, mode 600. See deploy/env.example.
+EnvironmentFile=/etc/billing-guard/env
+ExecStart=/usr/local/bin/node /opt/billing-guard/src/main.ts
+TimeoutStartSec=120
+# Runs as a throwaway user that can only write its own state directory.
+DynamicUser=yes
+StateDirectory=billing-guard
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native

@@ -1,0 +1,22 @@
+{
+  "name": "hetzner-billing-guard",
+  "version": "2.0.0",
+  "description": "A hard cap for Hetzner: alerts on traffic, new resources and the estimated bill, and shuts servers down before traffic overage",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc",
+    "check": "pnpm typecheck && pnpm test",
+    "prepare": "git config core.hooksPath .githooks"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "typescript": "^6.0.3"
+  }
+}

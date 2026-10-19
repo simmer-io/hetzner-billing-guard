@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Hetzner billing guard every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+# Runs never overlap: a timer doesn't start a oneshot service that's still running.
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

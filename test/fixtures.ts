@@ -1,5 +1,5 @@
 import type { Config } from '../src/config.ts'
-import type { CloudSnapshot, Server } from '../src/hcloud.ts'
+import type { Inventory, Server } from '../src/hcloud.ts'
 
 export const TIB = 1024 ** 4
 
@@ -7,9 +7,11 @@ export const cfg = (over: Partial<Config> = {}): Config => ({
   mode: 'enforce',
   hcloudToken: 'x',
   ntfyUrl: 'https://ntfy.example/topic',
+  healthcheckUrl: 'https://hc.example/ping/abc',
   trafficWarnPercent: 50,
   trafficKillPercent: 90,
-  monthlyBudgetEur: 100,
+  killOverrides: {},
+  monthlyBudget: 100,
   robotHourlyOutGb: 200,
   robotDailyOutGb: 2000,
   remindHours: 6,
@@ -32,13 +34,13 @@ export const server = (over: Partial<Server> = {}): Server => ({
   ...over
 })
 
-export const cloud = (over: Partial<CloudSnapshot> = {}): CloudSnapshot => ({
-  servers: [server()],
+export const inventory = (over: Partial<Inventory> = {}): Inventory => ({
   volumes: [],
   snapshots: [],
   primaryIps: [],
   floatingIps: [],
   loadBalancers: [],
+  storageBoxes: [],
   pricing: {
     currency: 'EUR',
     image: { price_per_gb_month: money('0.0110') },

@@ -77,6 +77,11 @@ describe('alert delivery', () => {
     assert.equal(body.unfurl_links, false)
   })
 
+  it('counts an alert sent when one channel took it, and returns the other failure', async () => {
+    globalThis.fetch = (async (u: string | URL) => (String(u).startsWith('https://ntfy') ? new Response('ok') : new Response('no', { status: 500 }))) as typeof fetch
+    assert.deepEqual(await deliver({ ntfyUrl: 'https://ntfy.example/topic', slackWebhookUrl: hook }, alert), ['slack: HTTP 500'])
+  })
+
   it('tries every channel, then fails without the webhook in the message', async () => {
     let calls = 0
     globalThis.fetch = (async (u: string | URL) => {

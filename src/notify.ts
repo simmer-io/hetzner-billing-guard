@@ -52,12 +52,17 @@ export async function sendSlack(webhook: string, alert: Alert) {
   if (!res.ok) throw new Error(`slack: HTTP ${res.status}`)
 }
 
-/** Sends to every configured channel, trying them all; throws if any of them failed. */
-export async function deliver(cfg: Pick<Config, 'ntfyUrl' | 'ntfyToken' | 'slackWebhookUrl'>, alert: Alert) {
+/**
+ * Sends to every configured channel, trying them all. Throws when none took it; otherwise returns the
+ * failures of the channels that didn't (empty when all did).
+ */
+export async function deliver(cfg: Pick<Config, 'ntfyUrl' | 'ntfyToken' | 'slackWebhookUrl'>, alert: Alert): Promise<string[]> {
   const failed: string[] = []
-  if (cfg.ntfyUrl) await sendNtfy(cfg.ntfyUrl, cfg.ntfyToken, alert).catch((e: Error) => failed.push(e.message))
-  if (cfg.slackWebhookUrl) await sendSlack(cfg.slackWebhookUrl, alert).catch((e: Error) => failed.push(e.message))
-  if (failed.length) throw new Error(failed.join('; '))
+  let ok = 0
+  if (cfg.ntfyUrl) await sendNtfy(cfg.ntfyUrl, cfg.ntfyToken, alert).then(() => ok++, (e: Error) => failed.push(e.message))
+  if (cfg.slackWebhookUrl) await sendSlack(cfg.slackWebhookUrl, alert).then(() => ok++, (e: Error) => failed.push(e.message))
+  if (ok === 0) throw new Error(failed.join('; ') || 'no alert channel configured')
+  return failed
 }
 
 /** Ping the healthcheck. Never throws: a failed ping must not hide the run's real outcome. */

@@ -243,6 +243,13 @@ describe('budget', () => {
     const inv = inventory()
     const r = run([server()], watched(), cfg(), { ...inv, pricing: { ...inv.pricing!, currency: 'USD' } })
     assert.deepEqual(keys(r.alerts), ['currency'])
+    assert.match(r.alerts[0]!.message, /Set BUDGET_CURRENCY=USD/)
+  })
+
+  it('stays quiet when the budget currency is the account\'s', () => {
+    const inv = inventory()
+    const r = run([server()], watched(), cfg({ budgetCurrency: 'USD' }), { ...inv, pricing: { ...inv.pricing!, currency: 'USD' } })
+    assert.deepEqual(keys(r.alerts), [])
   })
 })
 

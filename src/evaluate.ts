@@ -264,8 +264,8 @@ export function evaluate(inputs: Inputs, cfg: Config, prev: State, now: Date) {
     if (inv.pricing) {
       const est = estimateMonthly(inputs.servers, { ...inv, pricing: inv.pricing })
       const fmt = (n: number) => money(n, est.currency)
-      if (est.currency !== 'EUR') {
-        alerts.push({ key: 'currency', priority: 'default', title: 'Hetzner billing guard: account is not billed in EUR', message: `Prices come back in ${est.currency}; MONTHLY_BUDGET_EUR is compared in ${est.currency}.` })
+      if (est.currency !== cfg.budgetCurrency) {
+        alerts.push({ key: 'currency', priority: 'default', title: `Hetzner billing guard: account is not billed in ${cfg.budgetCurrency}`, message: `Prices come back in ${est.currency}; MONTHLY_BUDGET_EUR is compared in ${est.currency}. Set BUDGET_CURRENCY=${est.currency} once the budget is in ${est.currency}.` })
       }
       if (est.unpriced.length) {
         alerts.push({ key: 'unpriced', priority: 'high', title: 'Hetzner billing guard: some resources have no price', message: `The estimate leaves these out, so the real bill is higher: ${est.unpriced.slice(0, LIST_MAX).join('; ')}.` })

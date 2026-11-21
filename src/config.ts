@@ -20,6 +20,8 @@ export interface Config {
   killOverrides: Record<string, number>
   /** Alert when the estimated monthly Cloud run-rate goes above this (in the API's currency, excl. VAT). */
   monthlyBudget?: number
+  /** The currency the budget is in. The guard alerts if the API prices in another one. */
+  budgetCurrency: string
   /** Alert when a dedicated server sends more than this in one hour / 24 hours (GB). */
   robotHourlyOutGb: number
   robotDailyOutGb: number
@@ -106,6 +108,8 @@ export function loadConfig(env: Env): Config {
   if (trafficWarnPercent >= trafficKillPercent) throw new ConfigError('TRAFFIC_WARN_PERCENT must be below TRAFFIC_KILL_PERCENT')
 
   const monthlyBudget = number(env, 'MONTHLY_BUDGET_EUR')
+  const budgetCurrency = env.BUDGET_CURRENCY || 'EUR'
+  if (!/^[A-Z]{3}$/.test(budgetCurrency)) throw new ConfigError(`BUDGET_CURRENCY must be a 3-letter currency code like EUR or USD, got ${JSON.stringify(budgetCurrency)}`)
   if (hcloudToken && monthlyBudget === undefined) throw new ConfigError('MONTHLY_BUDGET_EUR is required with HCLOUD_TOKEN')
 
   return {
@@ -121,6 +125,7 @@ export function loadConfig(env: Env): Config {
     trafficKillPercent,
     killOverrides: overrides(env.KILL_OVERRIDES),
     monthlyBudget,
+    budgetCurrency,
     // A 1 Gbit/s port tops out near 450 GB/hour.
     robotHourlyOutGb: number(env, 'ROBOT_HOURLY_OUT_GB', 200)!,
     robotDailyOutGb: number(env, 'ROBOT_DAILY_OUT_GB', 2000)!,

@@ -12,6 +12,8 @@ describe('loadConfig', () => {
     assert.equal(c.trafficKillPercent, 90)
     assert.deepEqual(c.killOverrides, {})
     assert.equal(c.stateFile, './state.json')
+    assert.equal(c.budgetCurrency, 'EUR')
+    assert.equal(loadConfig({ ...base, BUDGET_CURRENCY: 'USD' }).budgetCurrency, 'USD')
   })
 
   it('uses the systemd state directory', () => {
@@ -42,6 +44,7 @@ describe('loadConfig', () => {
   })
 
   for (const [name, env] of Object.entries({
+    'a budget currency that is not a code': { ...base, BUDGET_CURRENCY: 'dollars' },
     'alert-only without a healthcheck': { ...base, GUARD_MODE: 'alert-only' },
     'a Slack URL that is not a Slack webhook': { ...base, SLACK_WEBHOOK_URL: 'https://example.com/services/T0000000/B0000000/abcdefghijklmnop' },
     'a plain-http Slack webhook': { ...base, SLACK_WEBHOOK_URL: 'http://hooks.slack.com/services/T0000000/B0000000/abcdefghijklmnop' },

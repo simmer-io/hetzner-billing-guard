@@ -5,6 +5,7 @@ export const TIB = 1024 ** 4
 
 export const cfg = (over: Partial<Config> = {}): Config => ({
   mode: 'enforce',
+  budgetCurrency: 'EUR',
   hcloudToken: 'x',
   ntfyUrl: 'https://ntfy.example/topic',
   healthcheckUrl: 'https://hc.example/ping/abc',

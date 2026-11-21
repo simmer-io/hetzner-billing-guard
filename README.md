@@ -73,6 +73,7 @@ All settings are environment variables. See [`deploy/env.example`](deploy/env.ex
 | `GUARD_MODE` | `dry-run` | `enforce` also shuts servers down. `alert-only` never tries (for a read-only token) and alerts urgently instead. |
 | `HCLOUD_TOKEN` | | Cloud API token (one project per install). |
 | `MONTHLY_BUDGET_EUR` | | Required with a Cloud token. Alert above this run-rate. |
+| `BUDGET_CURRENCY` | `EUR` | The budget's currency. Hetzner prices some accounts in USD; set `USD` there, or a "not billed in EUR" note repeats. |
 | `ROBOT_USER`, `ROBOT_PASSWORD` | | Optional Robot webservice login. |
 | `NTFY_URL` | | `https://ntfy.sh/<topic>` or your own server. This or `SLACK_WEBHOOK_URL` is required. |
 | `NTFY_TOKEN` | | Optional ntfy access token. |

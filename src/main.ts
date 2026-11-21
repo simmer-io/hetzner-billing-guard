@@ -7,7 +7,7 @@
 import { ConfigError, healthcheckUrlOf, loadConfig, type Config } from './config.ts'
 import { due, estimateMonthly, evaluate, includedTraffic, type Alert, type Inputs } from './evaluate.ts'
 import { Hcloud } from './hcloud.ts'
-import { ping, sendNtfy } from './notify.ts'
+import { deliver, ping } from './notify.ts'
 import { Robot } from './robot.ts'
 import { loadState, saveState } from './state.ts'
 
@@ -25,7 +25,7 @@ try {
 }
 
 if (process.argv.includes('--test-alert')) {
-  await sendNtfy(cfg.ntfyUrl, cfg.ntfyToken, { key: 'test', priority: 'default', title: 'Hetzner billing guard test', message: 'If you can read this, alerts work.' })
+  await deliver(cfg, { key: 'test', priority: 'default', title: 'Hetzner billing guard test', message: 'If you can read this, alerts work.' })
   console.log('test alert sent')
   process.exit(0)
 }
@@ -121,7 +121,7 @@ async function run(cfg: Config): Promise<string[]> {
   let delivered = 0
   for (const a of send) {
     try {
-      await sendNtfy(cfg.ntfyUrl, cfg.ntfyToken, a)
+      await deliver(cfg, a)
       console.log(`alert sent: ${a.title}`)
       delivered++
       if (a.key === 'new-resources') state.pendingNew = {}

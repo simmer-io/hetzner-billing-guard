@@ -26,11 +26,29 @@ describe('loadConfig', () => {
     assert.equal(loadConfig({ ...base, GUARD_MODE: 'enforce', HEALTHCHECK_URL: 'https://hc-ping.com/abc' }).mode, 'enforce')
   })
 
+  it('accepts alert-only with a healthcheck, and Slack alone or with ntfy', () => {
+    const hc = { HEALTHCHECK_URL: 'https://hc-ping.com/abc' }
+    assert.equal(loadConfig({ ...base, ...hc, GUARD_MODE: 'alert-only' }).mode, 'alert-only')
+    const slack = 'https://hooks.slack.com/services/T0000000/B0000000/abcdefghijklmnop'
+    const only = loadConfig({ HCLOUD_TOKEN: 't', MONTHLY_BUDGET_EUR: '60', SLACK_WEBHOOK_URL: slack })
+    assert.equal(only.slackWebhookUrl, slack)
+    assert.equal(only.ntfyUrl, undefined)
+    assert.equal(loadConfig({ ...base, SLACK_WEBHOOK_URL: slack }).ntfyUrl, 'https://ntfy.sh/x')
+  })
+
+  it('never puts the Slack webhook in its error', () => {
+    const bad = 'https://hooks.slack.com/services/secret-part-that-is-short'
+    assert.throws(() => loadConfig({ ...base, SLACK_WEBHOOK_URL: `${bad}?x=<` }), (e: Error) => e instanceof ConfigError && !e.message.includes('secret-part'))
+  })
+
   for (const [name, env] of Object.entries({
+    'alert-only without a healthcheck': { ...base, GUARD_MODE: 'alert-only' },
+    'a Slack URL that is not a Slack webhook': { ...base, SLACK_WEBHOOK_URL: 'https://example.com/services/T0000000/B0000000/abcdefghijklmnop' },
+    'a plain-http Slack webhook': { ...base, SLACK_WEBHOOK_URL: 'http://hooks.slack.com/services/T0000000/B0000000/abcdefghijklmnop' },
     'an unknown mode': { ...base, GUARD_MODE: 'on' },
     'enforce without a healthcheck': { ...base, GUARD_MODE: 'enforce' },
     'nothing to watch': { NTFY_URL: 'https://ntfy.sh/x' },
-    'no ntfy URL': { HCLOUD_TOKEN: 't', MONTHLY_BUDGET_EUR: '60' },
+    'no ntfy URL and no Slack webhook': { HCLOUD_TOKEN: 't', MONTHLY_BUDGET_EUR: '60' },
     'an ntfy URL with no topic': { ...base, NTFY_URL: 'https://ntfy.sh/' },
     'a plain-http ntfy URL': { ...base, NTFY_URL: 'http://ntfy.sh/x' },
     'credentials in a URL': { ...base, NTFY_URL: 'https://u:p@ntfy.sh/x' },

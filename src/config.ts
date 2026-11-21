@@ -2,12 +2,15 @@
 // run with a clear message (and a healthcheck failure ping, when the healthcheck URL itself is valid).
 
 export interface Config {
-  mode: 'dry-run' | 'enforce'
+  /** enforce stops servers; alert-only (for a read-only token) never tries; dry-run says what enforce would do. */
+  mode: 'dry-run' | 'enforce' | 'alert-only'
   hcloudToken?: string
   robotUser?: string
   robotPassword?: string
-  ntfyUrl: string
+  /** At least one of ntfyUrl and slackWebhookUrl; alerts go to every one set. */
+  ntfyUrl?: string
   ntfyToken?: string
+  slackWebhookUrl?: string
   healthcheckUrl?: string
   /** Alert when a Cloud server has used this share of its included traffic. */
   trafficWarnPercent: number
@@ -54,6 +57,9 @@ function url(env: Env, name: string, { needsPath }: { needsPath: boolean }): str
   return u.toString()
 }
 
+// A Slack incoming webhook. It's a credential: it never appears in an error or log line.
+const SLACK_WEBHOOK = /^https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9_/-]{20,200}$/
+
 /** "123=120,456=150": per-server kill thresholds. */
 function overrides(raw: string | undefined): Record<string, number> {
   const out: Record<string, number> = {}
@@ -78,7 +84,7 @@ export function healthcheckUrlOf(env: Env): string | undefined {
 
 export function loadConfig(env: Env): Config {
   const mode = env.GUARD_MODE ?? 'dry-run'
-  if (mode !== 'dry-run' && mode !== 'enforce') throw new ConfigError(`GUARD_MODE must be dry-run or enforce, got ${JSON.stringify(mode)}`)
+  if (mode !== 'dry-run' && mode !== 'enforce' && mode !== 'alert-only') throw new ConfigError(`GUARD_MODE must be dry-run, enforce or alert-only, got ${JSON.stringify(mode)}`)
 
   const hcloudToken = env.HCLOUD_TOKEN || undefined
   const robotUser = env.ROBOT_USER || undefined
@@ -87,11 +93,13 @@ export function loadConfig(env: Env): Config {
   if (!hcloudToken && !robotUser) throw new ConfigError('nothing to watch: set HCLOUD_TOKEN and/or ROBOT_USER + ROBOT_PASSWORD')
 
   const ntfyUrl = url(env, 'NTFY_URL', { needsPath: true })
-  if (!ntfyUrl) throw new ConfigError('NTFY_URL is required (for example https://ntfy.sh/<your-topic>)')
+  const slackWebhookUrl = env.SLACK_WEBHOOK_URL || undefined
+  if (slackWebhookUrl !== undefined && !SLACK_WEBHOOK.test(slackWebhookUrl)) throw new ConfigError('SLACK_WEBHOOK_URL must be a Slack incoming webhook (https://hooks.slack.com/services/...)')
+  if (!ntfyUrl && !slackWebhookUrl) throw new ConfigError('set NTFY_URL (for example https://ntfy.sh/<your-topic>) and/or SLACK_WEBHOOK_URL: alerts need somewhere to go')
 
   const healthcheckUrl = url(env, 'HEALTHCHECK_URL', { needsPath: true })
   // The healthcheck is the only signal that the guard itself has stopped.
-  if (mode === 'enforce' && !healthcheckUrl) throw new ConfigError('HEALTHCHECK_URL is required in enforce mode')
+  if (mode !== 'dry-run' && !healthcheckUrl) throw new ConfigError(`HEALTHCHECK_URL is required in ${mode} mode`)
 
   const trafficWarnPercent = number(env, 'TRAFFIC_WARN_PERCENT', 50, 100)!
   const trafficKillPercent = number(env, 'TRAFFIC_KILL_PERCENT', 90, 100)!
@@ -107,6 +115,7 @@ export function loadConfig(env: Env): Config {
     robotPassword,
     ntfyUrl,
     ntfyToken: env.NTFY_TOKEN || undefined,
+    slackWebhookUrl,
     healthcheckUrl,
     trafficWarnPercent,
     trafficKillPercent,

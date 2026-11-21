@@ -4,10 +4,11 @@
 // Any run that couldn't fully do its job (an API it couldn't read, an action or alert that failed)
 // exits 1 and pings the healthcheck's /fail, so a guard that's quietly not watching is never "green".
 
+import { act } from './act.ts'
 import { ConfigError, healthcheckUrlOf, loadConfig, type Config } from './config.ts'
 import { due, estimateMonthly, evaluate, includedTraffic, type Alert, type Inputs } from './evaluate.ts'
 import { Hcloud } from './hcloud.ts'
-import { ping, sendNtfy } from './notify.ts'
+import { deliver, ping } from './notify.ts'
 import { Robot } from './robot.ts'
 import { loadState, saveState } from './state.ts'
 
@@ -25,7 +26,7 @@ try {
 }
 
 if (process.argv.includes('--test-alert')) {
-  await sendNtfy(cfg.ntfyUrl, cfg.ntfyToken, { key: 'test', priority: 'default', title: 'Hetzner billing guard test', message: 'If you can read this, alerts work.' })
+  await deliver(cfg, { key: 'test', priority: 'default', title: 'Hetzner billing guard test', message: 'If you can read this, alerts work.' })
   console.log('test alert sent')
   process.exit(0)
 }
@@ -91,22 +92,9 @@ async function run(cfg: Config): Promise<string[]> {
   const { alerts, actions, state, problems: ruleProblems } = evaluate(inputs, cfg, prev, now)
   problems.push(...ruleProblems)
 
-  for (const a of actions) {
-    if (cfg.mode === 'dry-run') {
-      console.log(`dry-run: would ${a.kind} ${a.serverName} (${a.serverId})`)
-      continue
-    }
-    try {
-      await (a.kind === 'shutdown' ? hcloud!.shutdown(a.serverId) : hcloud!.poweroff(a.serverId))
-      console.log(`${a.kind}: ${a.serverName} (${a.serverId})`)
-      // The next escalation (or a repeated power-off) waits POWEROFF_AFTER_MS from now.
-      state.shutdownAt[a.serverId] = now.toISOString()
-      if (a.kind === 'poweroff') state.poweroffs[a.serverId] = (state.poweroffs[a.serverId] ?? 0) + 1
-    } catch (e) {
-      problems.push((e as Error).message)
-      extra.push({ key: `action-failed:${a.serverId}`, priority: 'urgent', title: `Hetzner billing guard: could not stop ${a.serverName}`, message: `${a.kind} of ${a.serverName} failed: ${(e as Error).message}. Stop it in the console now.`, remindMinutes: 30 })
-    }
-  }
+  const acted = await act(cfg.mode, actions, hcloud, state, now)
+  problems.push(...acted.problems)
+  extra.push(...acted.alerts)
   // Save what was done before notifying, so a hung notification can't make the next run repeat it.
   // A failed save must not stop the alerts.
   try {
@@ -121,7 +109,10 @@ async function run(cfg: Config): Promise<string[]> {
   let delivered = 0
   for (const a of send) {
     try {
-      await sendNtfy(cfg.ntfyUrl, cfg.ntfyToken, a)
+      // Throws only when no channel took it; a channel that failed while another worked is a problem,
+      // but the alert counts as sent, so the working channel isn't sent it again every run.
+      const partial = await deliver(cfg, a)
+      if (partial.length) problems.push(`alert "${a.title}" not delivered everywhere: ${partial.join('; ')}`)
       console.log(`alert sent: ${a.title}`)
       delivered++
       if (a.key === 'new-resources') state.pendingNew = {}

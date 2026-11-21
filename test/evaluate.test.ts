@@ -62,6 +62,20 @@ describe('traffic', () => {
     assert.match(r.alerts[0]!.message, /Dry-run/)
   })
 
+  it('in alert-only (a read-only token) never acts, and tells a person to stop it, even after an old stop request', () => {
+    const r = run([server({ outgoing_traffic: 19 * TIB })], watched(), cfg({ mode: 'alert-only' }))
+    assert.deepEqual(r.actions, [])
+    assert.deepEqual(keys(r.alerts), ['traffic-kill:1'])
+    assert.equal(r.alerts[0]!.priority, 'urgent')
+    assert.equal(r.alerts[0]!.force, false)
+    assert.match(r.alerts[0]!.message, /can't stop servers \(alert-only mode\): shut it down in the console now/)
+    assert.match(r.alerts[0]!.message, /Paid overage starts at 100%\.$/)
+    const warn = run([server({ outgoing_traffic: 11 * TIB })], watched(), cfg({ mode: 'alert-only' }))
+    assert.match(warn.alerts[0]!.message, /The urgent alert comes at 90%/)
+    const later = run([server({ outgoing_traffic: 19 * TIB })], watched({ shutdownAt: { 1: new Date(0).toISOString() } }), cfg({ mode: 'alert-only' }))
+    assert.deepEqual(later.actions, [])
+  })
+
   it('falls back to the type price list when the server has no included-traffic figure', () => {
     const r = run([server({ included_traffic: null, outgoing_traffic: 19 * TIB })])
     assert.deepEqual(r.actions.map(a => a.kind), ['shutdown'])

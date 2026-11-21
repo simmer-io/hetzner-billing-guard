@@ -8,7 +8,11 @@ Hetzner has no spending cap. This small script adds one for the cost that can gr
 4. **It watches dedicated (Robot) servers' traffic** and alerts on a busy hour or day. 1 Gbit/s servers have unmetered traffic, so for them this is an early warning for hotlinking or abuse. Servers with a traffic quota (for example 10 Gbit/s uplinks) are checked against it month to date. The guard never acts on dedicated servers.
 5. **It tells you when it isn't working.** Every run pings a [healthchecks.io](https://healthchecks.io) check. A run that couldn't fully do its job reports a failure: an API it couldn't read, an action or alert that failed, a broken state file. If the guard stops running at all, healthchecks.io notices the missing pings.
 
-Alerts go to [ntfy](https://ntfy.sh), a phone app that needs no account.
+Alerts go to [ntfy](https://ntfy.sh), a phone app that needs no account, and/or a Slack channel through an incoming webhook.
+
+**Two ways to run it:**
+- **With a Read & Write token** (`GUARD_MODE=enforce`), it is a hard cap: it shuts servers down before traffic overage starts.
+- **With a read-only token** (`GUARD_MODE=alert-only`), it only alerts: an urgent alert at the kill threshold instead of a shutdown, and every other check as usual. A leaked read-only token can only show your inventory, never change it. Pick this when the overage you could run into is small next to the risk of a write token sitting on another machine (in the EU, Hetzner bills about €1 per TB over).
 
 Version 1 of this tool ran as a GitHub Actions cron. GitHub disables scheduled workflows in repos with no activity for 60 days, which silently switched the guard off. Version 2 runs as a systemd timer and reports its own health.
 
@@ -26,14 +30,26 @@ Read this before you rely on it.
 - **Traffic figures lag a little**, so the kill threshold leaves headroom. Robot reports only completed hours, so dedicated-server alerts can arrive up to about 2 hours late.
 - **The Robot API doesn't say which timezone its hours are in.** The guard assumes UTC, and reads only hours that are complete either way.
 
+## Where to run it: not GitHub Actions
+
+The guard needs a host that stays on and keeps a state file between runs. A scheduled GitHub Actions workflow is a poor fit, which is why version 2 left it:
+- GitHub turns off scheduled workflows in a repository with no activity for 60 days, silently. That's how version 1 stopped.
+- Scheduled runs are best effort: under load they start late or get dropped, so "every 5 minutes" isn't.
+- The guard's state (what already existed, which alerts were sent) would have to live in a cache or artifact between runs.
+- On a public repository, anyone can read the run logs, which name your servers and your spending.
+
+A small always-on Linux machine works: a cheap VM at another provider, or a machine at home. Its healthcheck tells you when it isn't running.
+
 ## Setup
 
 You need a small Linux host with systemd **outside Hetzner**, so it keeps working if Hetzner servers are stopped or the account is in trouble. Any $4–6/month VM works. It also needs Node.js 24 or newer, installed system-wide at `/usr/local/bin/node`: the service can't read `/root` or `/home`, so a mise or nvm install there won't work. The guard has no runtime dependencies.
 
-1. **Hetzner Cloud token:** Console → your project → Security → API tokens → *Read & Write*. Write is needed only to shut servers down. Make a dedicated token for the guard.
+1. **Hetzner Cloud token:** Console → your project → Security → API tokens → Generate API token. *Read & Write* for `enforce` (write is needed only to shut servers down), or *Read* for `alert-only`. Make a dedicated token for the guard.
 2. **Robot user**, optional, for dedicated servers: Robot → Settings → Webservice and app settings.
-3. **ntfy topic:** a protected topic with an access token is best. Otherwise pick a long random topic name. Subscribe to it in the ntfy app.
-4. **healthchecks.io check:** period 5 minutes, grace 15 minutes. It's required for enforce mode.
+3. **Where alerts go**, one or both:
+   - **ntfy topic:** a protected topic with an access token is best. Otherwise pick a long random topic name. Subscribe to it in the ntfy app.
+   - **Slack:** an incoming webhook for a channel you get phone notifications from (Slack → Apps → Incoming Webhooks).
+4. **healthchecks.io check:** period 5 minutes, grace 15 minutes. It's required in `enforce` and `alert-only` mode.
 5. **Install**, as root on the guard host:
    ```sh
    git clone https://github.com/simmer-io/hetzner-billing-guard /opt/src/hetzner-billing-guard
@@ -44,7 +60,7 @@ You need a small Linux host with systemd **outside Hetzner**, so it keeps workin
    systemctl enable --now billing-guard.timer
    ```
    The env file uses systemd's format: one `NAME=value` per line, no quotes, and no comments after a value. The `systemd-run` test reads it exactly as the service does.
-6. **Switch to enforce** after a day of dry-run reports look right: set `GUARD_MODE=enforce` in `/etc/billing-guard/env`. To update later, run `git pull` and `sh deploy/install.sh` again.
+6. **Switch modes** after a day of dry-run reports look right: set `GUARD_MODE=enforce` (Read & Write token) or `GUARD_MODE=alert-only` (read-only token) in `/etc/billing-guard/env`. To update later, run `git pull` and `sh deploy/install.sh` again.
 
 The first run records the resources that exist today and sends a "watching" notification. Only resources created after that raise new-resource alerts.
 
@@ -54,13 +70,14 @@ All settings are environment variables. See [`deploy/env.example`](deploy/env.ex
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GUARD_MODE` | `dry-run` | `enforce` also shuts servers down. |
+| `GUARD_MODE` | `dry-run` | `enforce` also shuts servers down. `alert-only` never tries (for a read-only token) and alerts urgently instead. |
 | `HCLOUD_TOKEN` | | Cloud API token (one project per install). |
 | `MONTHLY_BUDGET_EUR` | | Required with a Cloud token. Alert above this run-rate. |
 | `ROBOT_USER`, `ROBOT_PASSWORD` | | Optional Robot webservice login. |
-| `NTFY_URL` | | Required. `https://ntfy.sh/<topic>` or your own server. |
+| `NTFY_URL` | | `https://ntfy.sh/<topic>` or your own server. This or `SLACK_WEBHOOK_URL` is required. |
 | `NTFY_TOKEN` | | Optional ntfy access token. |
-| `HEALTHCHECK_URL` | | healthchecks.io ping URL. Required in enforce mode. |
+| `SLACK_WEBHOOK_URL` | | A Slack incoming webhook (`https://hooks.slack.com/services/…`). Alerts go to every channel set. |
+| `HEALTHCHECK_URL` | | healthchecks.io ping URL. Required in `enforce` and `alert-only` mode. |
 | `TRAFFIC_WARN_PERCENT` | `50` | Alert at this share of included traffic. |
 | `TRAFFIC_KILL_PERCENT` | `90` | Shut down at this share (at most 100). Also the alert level for dedicated-server quotas. |
 | `KILL_OVERRIDES` | | Per-server thresholds, `<id>=<percent>,…` (at most 200). |
@@ -70,9 +87,9 @@ All settings are environment variables. See [`deploy/env.example`](deploy/env.ex
 
 ## Security notes
 
-- **The Cloud token is powerful.** It can create, stop and delete anything in its project, because Hetzner tokens can't be scoped more narrowly. So the guard host is now a place where a token like that can leak. Treat it as a production box: SSH keys only, no other services, and the env file readable only by root.
+- **A Read & Write Cloud token is powerful.** It can create, stop and delete anything in its project, because Hetzner tokens can't be scoped more narrowly than Read or Read & Write. In `alert-only` mode use a *Read* token instead. So the guard host is now a place where a token like that can leak. Treat it as a production box: SSH keys only, no other services, and the env file readable only by root.
 - **The service runs locked down,** as a throwaway systemd user with a read-only filesystem except for its own state directory, and no access to `/home`.
-- **Logs, alerts and healthcheck messages never include tokens.**
+- **Logs, alerts and healthcheck messages never include tokens** or the Slack webhook (it can post to your channel).
 - **Alerts include server names and spending**, so keep the ntfy topic private.
 
 ## Development

@@ -158,6 +158,8 @@ export function evaluate(inputs: Inputs, cfg: Config, prev: State, now: Date) {
   const problems: string[] = []
   const state: State = { ...prev, pendingNew: { ...prev.pendingNew }, lastSent: { ...prev.lastSent }, shutdownAt: { ...prev.shutdownAt }, poweroffs: { ...prev.poweroffs } }
   const dry = cfg.mode === 'dry-run'
+  // A read-only token can't stop anything: say so, and leave it to a person.
+  const alertOnly = cfg.mode === 'alert-only'
 
   // 1. Traffic: warn, then stop the server before it runs into paid overage.
   for (const s of inputs.servers ?? []) {
@@ -178,7 +180,9 @@ export function evaluate(inputs: Inputs, cfg: Config, prev: State, now: Date) {
       let what = 'It is off.'
       if (!isOff(s)) {
         const asked = state.shutdownAt[s.id]
-        if (!asked) {
+        if (alertOnly) {
+          what = `It is ${s.status}, and this guard can't stop servers (alert-only mode): shut it down in the console now.`
+        } else if (!asked) {
           actions.push({ kind: 'shutdown', serverId: s.id, serverName: s.name })
           what = dry ? `Dry-run: would shut it down (it is ${s.status}).` : 'Shutting it down.'
         } else if (now.getTime() - Date.parse(asked) >= POWEROFF_AFTER_MS) {
@@ -197,12 +201,12 @@ export function evaluate(inputs: Inputs, cfg: Config, prev: State, now: Date) {
         key: `traffic-kill:${s.id}`,
         priority: 'urgent',
         title: `Hetzner traffic: ${s.name} over ${kill}%`,
-        message: `${s.name} has sent ${usage} of its included traffic this month. ${what} It stays down while over ${kill}%. To bring just this server back, set KILL_OVERRIDES=${s.id}=<higher percent>.`,
+        message: `${s.name} has sent ${usage} of its included traffic this month. ${what}${alertOnly ? ' Paid overage starts at 100%.' : ` It stays down while over ${kill}%. To bring just this server back, set KILL_OVERRIDES=${s.id}=<higher percent>.`}`,
         // A real stop is news; in dry-run the same "would stop" is a reminder.
         force: !dry && actions.some(a => a.serverId === s.id && (a.kind === 'shutdown' || !state.poweroffs[s.id]))
       })
     } else if (pct >= cfg.trafficWarnPercent) {
-      alerts.push({ key: `traffic-warn:${s.id}`, priority: 'high', title: `Hetzner traffic: ${s.name} at ${pct.toFixed(0)}%`, message: `${s.name} has sent ${usage} of its included traffic. It is shut down at ${kill}%.` })
+      alerts.push({ key: `traffic-warn:${s.id}`, priority: 'high', title: `Hetzner traffic: ${s.name} at ${pct.toFixed(0)}%`, message: `${s.name} has sent ${usage} of its included traffic. ${alertOnly ? `The urgent alert comes at ${kill}%.` : `It is shut down at ${kill}%.`}` })
     }
   }
   for (const lb of inputs.inventory?.loadBalancers ?? []) {
